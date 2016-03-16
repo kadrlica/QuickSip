@@ -1,12 +1,12 @@
 # QuickSip
-Pipeline to quickly project Survey Image Properties (e.g. seeing, sky noise, airmass) onto the sky into Healpix maps using flexible weighting schemes. Initially designed to produce maps of observing condition systematics for the Dark Energy Survey (DES), but will work with any multi-epoch survey and collection of images with valid WCS information.
+Quickly projects Survey Image Properties (e.g. seeing, sky noise, airmass) into Healpix sky maps with flexible weighting schemes. Initially designed to produce observing condition "systematics" maps for the Dark Energy Survey (DES), but will work with any multi-epoch survey and images with valid WCS.
 
 Tested against Mangle outputs; QuickSip will reproduce the Mangle magnitude limit maps at sub-percent accuracy but doesn't support additional masks (stars, trails, etc) in which case Mangle should be used. Thus, QuickSip can be seen as a simplified Mangle to project image properties into Healpix maps in a fast and more flexible manner.
 
 For DES members, more details and products can be found at https://cdcvs.fnal.gov/redmine/projects/des-lss/wiki/Systematics_maps.
 
 # Need help?
-Please use github issues or email! Tutorials and improvements are under way but will come faster if you trigger them!
+Please use github issues or email (Boris.leistedt@gmail.com)! Tutorials and improvements are under way but will come faster if you trigger them.
 
 # License
 Copyright 2012-2016 Boris Leistedt.
