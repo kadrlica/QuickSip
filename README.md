@@ -3,7 +3,12 @@ Quickly projects Survey Image Properties (e.g. seeing, sky noise, airmass) into 
 
 Tested against Mangle outputs; QuickSip will reproduce the Mangle magnitude limit maps at sub-percent accuracy but doesn't support additional masks (stars, trails, etc) in which case Mangle should be used. Thus, QuickSip can be seen as a simplified Mangle to project image properties into Healpix maps in a fast and more flexible manner.
 
-For DES members, more details and products can be found at https://cdcvs.fnal.gov/redmine/projects/des-lss/wiki/Systematics_maps.
+For DES members, more details and products can be found at https://cdcvs.fnal.gov/redmine/projects/des-lss/wiki/Systematics_maps. Some examples below.
+
+<img src="http://inspirehep.net/record/1384083/files/pics_ccdplot.png" height="200" />
+<img src="http://inspirehep.net/record/1384083/files/pics_DES0009-4914_nside8192_oversamp4_count__total.png" height="200" />
+<img src="http://inspirehep.net/record/1384083/files/pics_DES0009-4914_nside8192_oversamp4_FWHM__mean.png" height="200" />
+
 
 # Need help?
 Please use github issues or email (Boris.leistedt@gmail.com)! Tutorials and improvements are under way but will come faster if you trigger them.
