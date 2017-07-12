@@ -85,9 +85,9 @@ def ring_num(nside, z, shift=0):
        iring = np.round( nside * np.sqrt(3.0*(1.0+z)) - my_shift )
        if (iring == 0):
            iring = 1
-       iring = long(4*nside - iring)
+       iring = int(4*nside - iring)
     # return ring number
-    return long(iring)
+    return int(iring)
 
 # ---------------------------------------------------------------------------------------- #
 
@@ -132,7 +132,7 @@ def in_ring(nside, iz, phi_low, phi_hi, conservative=True):
             ir = 4*nside - iz
             ipix1 = npix - 2*ir*(ir+1) #  lowest pixel number in the ring
             ipix2 = ipix1 + 4*ir - 1   # highest pixel number in the ring
-        nr = long(ir*4)
+        nr = int(ir*4)
         kshift = 1
 
     twopi = 2*np.pi
@@ -163,14 +163,14 @@ def in_ring(nside, iz, phi_low, phi_hi, conservative=True):
         to_top = True
     else:
         to_top = False
-    ip_low = long( ip_low + ipix1 )
-    ip_hi  = long( ip_hi  + ipix1 )
+    ip_low = int( ip_low + ipix1 )
+    ip_hi  = int( ip_hi  + ipix1 )
 
-    ipix1 = long(ipix1)
+    ipix1 = int(ipix1)
     if (to_top):
-        nir1 = long( ipix2 - ip_low + 1 )
-        nir2 = long( ip_hi - ipix1  + 1 )
-        nir  = long( nir1 + nir2 )
+        nir1 = int( ipix2 - ip_low + 1 )
+        nir2 = int( ip_hi - ipix1  + 1 )
+        nir  = int( nir1 + nir2 )
         if ((nir1 > 0) and (nir2 > 0)):
             listir   = np.concatenate( (np.arange(ipix1, nir2+ipix1), np.arange(ip_low, nir1+ip_low) ) )
         else:
@@ -179,7 +179,7 @@ def in_ring(nside, iz, phi_low, phi_hi, conservative=True):
             if nir2 == 0:
                 listir   = np.arange(ip_low, nir1+ip_low)
     else:
-        nir = long(ip_hi - ip_low + 1 )
+        nir = int(ip_hi - ip_low + 1 )
         listir = np.arange(ip_low, nir+ip_low)
 
     return listir
@@ -195,7 +195,7 @@ def lininterp(xval, xA, yA, xB, yB):
 
 # ---------------------------------------------------------------------------------------- #
 
-# Test if val belongs to interval [b1, b2]
+# Test if val beints to interval [b1, b2]
 def inInter(val, b1, b2):
     if b1 <= b2:
         return np.logical_and( val <= b2, val >= b1 )
@@ -272,8 +272,9 @@ def in_region(thetavals, phivals, thetaU, phiU, thetaR, phiR, thetaL, phiL, thet
 # pixoffset is the number of pixels to truncate on the edges of each ccd image.
 # ratiores is the super-resolution factor, i.e. the edges of each ccd image are processed
 #   at resultion 4*nside and then averaged at resolution nside.
-def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_cut=True):
+def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_cut=True, ipixel_low=None, nside_low=None):
     img_ras, img_decs = computeCorners_WCS_TPV(propertyArray, pixoffset)
+
     # Coordinates of coadd corners
     # RALL, t.DECLL, t.RAUL, t.DECUL, t.RAUR, t.DECUR, t.RALR, t.DECLR, t.URALL, t.UDECLL, t.URAUR, t.UDECUR
     if coadd_cut:
@@ -287,6 +288,12 @@ def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_
     # Coordinates of image corners
     img_phis = img_ras * np.pi/180
     img_thetas =  np.pi/2  - img_decs * np.pi/180
+
+    if ipixel_low is not None and nside_low is not None:
+        img_pix = hp.ang2pix(nside_low, img_thetas, img_phis, nest=False)
+        if ipixel_low not in img_pix:
+            return None
+
     img_pix = hp.ang2pix(nside, img_thetas, img_phis, nest=False)
     pix_thetas, pix_phis = hp.pix2ang(nside, img_pix, nest=False)
     #img_phis = np.mod( img_phis + np.pi, 2*np.pi ) # Enable these two lines to rotate everything by 180 degrees
@@ -295,7 +302,7 @@ def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_
     ind_L = 2
     ind_R = 3
     ind_B = 1
-    ipix_list = np.zeros(0, dtype=long)
+    ipix_list = np.zeros(0, dtype=int)
     weight_list = np.zeros(0, dtype=float)
     # loop over rings until reached bottom
     iring_U = ring_num(nside, np.cos(img_thetas.min()), shift=0)
@@ -547,6 +554,31 @@ def projectNDpix(args):
     else:
         return hp.UNSEEN
 
+
+# Create a "healtree", i.e. a set of pixels with trees of images in them.
+def makeHealTree_partial(args):
+    samplename, nside, ipixel_low, nside_low, ratiores, pixoffset, tbdata = args
+    treemap = HealTree(nside)
+    verbcount = 1000
+    count = 0
+    start = time.time()
+    duration = 0
+    print ('>', samplename, ': starting tree making')
+    for i, propertyArray in enumerate(tbdata):
+        count += 1
+        start_one = time.time()
+        treemap.addElem_partial(propertyArray, ratiores, pixoffset, ipixel_low, nside_low)
+        end_one = time.time()
+        duration += float(end_one - start_one)
+        if count == verbcount:
+            print ('>', samplename, ': processed images', i-verbcount+1, '-', i+1, '(on '+str(len(tbdata))+') in %.2f' % duration, 'sec (~ %.3f' % (duration/float(verbcount)), 'per image)')
+            count = 0
+            duration = 0
+    end = time.time()
+    print ('>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', len(tbdata), 'images')
+    return treemap
+
+
 # Create a "healtree", i.e. a set of pixels with trees of images in them.
 def makeHealTree(args):
     samplename, nside, ratiores, pixoffset, tbdata = args
@@ -555,7 +587,7 @@ def makeHealTree(args):
     count = 0
     start = time.time()
     duration = 0
-    print '>', samplename, ': starting tree making'
+    print ('>', samplename, ': starting tree making')
     for i, propertyArray in enumerate(tbdata):
         count += 1
         start_one = time.time()
@@ -563,11 +595,11 @@ def makeHealTree(args):
         end_one = time.time()
         duration += float(end_one - start_one)
         if count == verbcount:
-            print '>', samplename, ': processed images', i-verbcount+1, '-', i+1, '(on '+str(len(tbdata))+') in %.2f' % duration, 'sec (~ %.3f' % (duration/float(verbcount)), 'per image)'
+            print ('>', samplename, ': processed images', i-verbcount+1, '-', i+1, '(on '+str(len(tbdata))+') in %.2f' % duration, 'sec (~ %.3f' % (duration/float(verbcount)), 'per image)')
             count = 0
             duration = 0
     end = time.time()
-    print '>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', len(tbdata), 'images'
+    print ('>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', len(tbdata), 'images')
     return treemap
 
 # ---------------------------------------------------------------------------------------- #
@@ -594,6 +626,20 @@ class HealTree:
                 self.pixlist[ipix].addElem(propertyArray, subpixrings[ii,:])
 
 
+    # Process image and absorb its properties
+    def addElem_partial(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low):
+        # Retrieve pixel indices
+        out = computeHPXpix_sequ_new(self.nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores, ipixel_low=ipixel_low, nside_low=nside_low)
+        if out is not None:
+            ipixels, weights, thetas_c, phis_c, subpixrings = out
+            # For each pixel, absorb image properties
+            for ii, (ipix, weight) in enumerate(zip(ipixels, weights)):
+                if self.pixlist[ipix] == 0:
+                    self.pixlist[ipix] = NDpix(propertyArray, subpixrings[ii,:], ratiores)
+                else:
+                    self.pixlist[ipix].addElem(propertyArray, subpixrings[ii,:])
+
+
      # Project HealTree into partial Healpix map
      # for a given property and operation applied to its array of images
     def project_partial(self, property, weights, operation, pool=None):
@@ -611,11 +657,11 @@ class HealTree:
             end_one = time.time()
             duration += float(end_one - start_one)
             if count == verbcount:
-                print '>', property, weights, operation, ': processed pixels', i-verbcount+1, '-', i+1, '(on '+str(pixel.size)+') in %.1e' % duration, 'sec (~ %.1e' % (duration/float(verbcount)), 'per pixel)'
+                print ('>', property, weights, operation, ': processed pixels', i-verbcount+1, '-', i+1, '(on '+str(pixel.size)+') in %.1e' % duration, 'sec (~ %.1e' % (duration/float(verbcount)), 'per pixel)')
                 count = 0
                 duration = 0
         end = time.time()
-        print '> Projection', property, weights, operation, ' took : %.2f' % float(end - start), 'sec for', pixel.size, 'pixels'
+        print ('> Projection', property, weights, operation, ' took : %.2f' % float(end - start), 'sec for', pixel.size, 'pixels')
         #signal = [pix.project(property, weights, operation) for pix in self.pixlist[ind]]
         return pixel, signal
 
@@ -656,10 +702,10 @@ def addElemHealTree(args):
 def addElem(args):
     iarr, tbdatadtype, propertyArray, nside, propertiesToKeep, ratiores = args
     propertyArray.dtype = tbdatadtype
-    print 'Processing image', iarr, propertyArray['RA']
+    print ('Processing image', iarr, propertyArray['RA'])
     # Retrieve pixel indices
     ipixels, weights, thetas_c, phis_c = computeHPXpix_sequ_new(nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
-    print 'Processing image', iarr, thetas_c, phis_c
+    print ('Processing image', iarr, thetas_c, phis_c)
     # For each pixel, absorb image properties
     for ipix, weight in zip(ipixels, weights):
         if globalTree[ipix] == 0:
@@ -670,7 +716,7 @@ def addElem(args):
 # ---------------------------------------------------------------------------------------- #
 
 # Read and project a Healtree into Healpix maps, and write them.
-def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_name, outrootdir, sample_names, inds, nside, ratiores, pixoffset, nsidesout=None):
+def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_name, outrootdir, sample_names, inds, nside, ratiores, pixoffset, ipixel_low=1, nside_low=1, nsidesout=None):
 
     resol_prefix = 'nside'+str(nside)+'_oversamp'+str(ratiores)
     outroot = outrootdir + '/' + catalogue_name + '/' + resol_prefix + '/'
@@ -682,7 +728,7 @@ def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_
                 cutmap_indices, cutmap_signal = makeHpxMap_partial( (treemap, property, weights, operation) )
                 if nsidesout is None:
                     fname = outroot + '_'.join([catalogue_name, sample_name, resol_prefix, property, weights, operation]) + '.fits'
-                    print 'Creating and writing', fname
+                    print ('Creating and writing', fname)
                     write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=False)
                 else:
                     cutmap_indices_nest = hp.ring2nest(nside, cutmap_indices)
@@ -698,32 +744,32 @@ def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_
                         outroot2 = outrootdir + '/' + catalogue_name + '/' + resol_prefix2 + '/'
                         mkdir_p(outroot2)
                         fname = outroot2 + '_'.join([catalogue_name, sample_name, resol_prefix2, property, weights, operation]) + '.fits'
-                        print 'Writing', fname
+                        print ('Writing', fname)
                         hp.write_map(fname, outmap_lo, nest=True)
                         subprocess.call("gzip "+fname,shell=True)
 
 
     if mode == 3: # Fully parallel
         pool = Pool(len(inds))
-        print 'Creating HealTrees'
+        print ('Creating HealTrees')
         treemaps = pool.map( makeHealTree,
                          [ (catalogue_name+'_'+samplename, nside, ratiores, pixoffset, np.array(tbdata[ind]))
                            for samplename, ind in zip(sample_names, inds) ] )
 
         for property, weights, operation in propertiesweightsoperations:
-            print 'Making maps for', property, weights, operation
+            print ('Making maps for', property, weights, operation)
             outmaps = pool.map( makeHpxMap_partial,
                             [ (treemap, property, weights, operation) for treemap in treemaps ] )
             for sample_name, outmap in zip(sample_names, outmaps):
                 fname = outroot + '_'.join([catalogue_name, sample_name, resol_prefix, property, weights, operation]) + '.fits'
-                print 'Writing', fname
+                print ('Writing', fname)
                 cutmap_indices, cutmap_signal = outmap
                 write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=False)
 
 
     if mode == 2:  # Parallel tree making and sequential writing
         pool = Pool(len(inds))
-        print 'Creating HealTrees'
+        print ('Creating HealTrees')
         treemaps = pool.map( makeHealTree,
                          [ (catalogue_name+'_'+samplename, nside, ratiores, pixoffset, np.array(tbdata[ind]))
                            for samplename, ind in zip(sample_names, inds) ] )
@@ -731,12 +777,45 @@ def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_
         for property, weights, operation in propertiesweightsoperations:
             for sample_name, treemap in zip(sample_names, treemaps):
                 fname = outroot + '_'.join([catalogue_name, sample_name, resol_prefix, property, weights, operation]) + '.fits'
-                print 'Writing', fname
+                print ('Writing', fname)
                 #outmap = makeHpxMap( (treemap, property, weights, operation) )
                 #hp.write_map(fname, outmap, nest=False)
                 cutmap_indices, cutmap_signal = makeHpxMap_partial( (treemap, property, weights, operation) )
                 write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=False)
 
+    if mode == 4: # Fully sequential with ccds grouped in pixel
+        ratiores2 = 2 ** (np.log(nside / nside_low) / np.log(2))
+        ipixel_low2 = hp.ring2nest(nside_low, ipixel_low)
+        subipixs_nest = np.arange(ipixel_low2*ratiores2**2, ipixel_low2*ratiores2**2+ratiores2**2, dtype=np.int64)
+        subipixs_ring = hp.nest2ring(nside, subipixs_nest)
+        invert_subipixs_ring = np.setdiff1d(np.arange(hp.nside2npix(nside)), subipixs_ring)
+        for sample_name, ind in zip(sample_names, inds):
+            treemap = makeHealTree_partial( (catalogue_name+'_'+sample_name, nside, ipixel_low, nside_low, ratiores, pixoffset, np.array(tbdata[ind])) )
+            treemap.pixlist[invert_subipixs_ring] = np.zeros(invert_subipixs_ring.size, dtype=object)
+            for property, weights, operation in propertiesweightsoperations:
+                cutmap_indices, cutmap_signal = makeHpxMap_partial( (treemap, property, weights, operation) )
+                if np.sum(treemap.pixlist != 0) > 0:
+                    if nsidesout is None:
+                        fname = outroot + '_'.join([catalogue_name, sample_name, resol_prefix, property, weights, operation]) + '_' + str(ipixel_low) + '.fits'
+                        print ('Creating and writing', fname)
+                        write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=False)
+                    else:
+                        cutmap_indices_nest = hp.ring2nest(nside, cutmap_indices)
+                        outmap_hi = np.zeros(hp.nside2npix(nside))
+                        outmap_hi.fill(0.0) #outmap_hi.fill(hp.UNSEEN)
+                        outmap_hi[cutmap_indices_nest] = cutmap_signal
+                        for nside_out in nsidesout:
+                            if nside_out == nside:
+                                outmap_lo = outmap_hi
+                            else:
+                                outmap_lo = hp.ud_grade(outmap_hi, nside_out, order_in='NESTED', order_out='NESTED')
+                            resol_prefix2 = 'nside'+str(nside_out)+'from'+str(nside)+'o'+str(ratiores)
+                            outroot2 = outrootdir + '/' + catalogue_name + '/' + resol_prefix2 + '/'
+                            mkdir_p(outroot2)
+                            fname = outroot2 + '_'.join([catalogue_name, sample_name, resol_prefix2, property, weights, operation]) + '_' + str(ipixel_low) + '.fits'
+                            print ('Writing', fname)
+                            hp.write_map(fname, outmap_lo, nest=True)
+                            subprocess.call("gzip "+fname,shell=True)
 # ---------------------------------------------------------------------------------------- #
 
 
@@ -744,57 +823,53 @@ def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_
 
 
 def test():
-	fname = '/Users/bl/Dropbox/Projects/Quicksip/data/SVA1_COADD_ASTROM_PSF_INFO.fits'
-	#fname = '/Users/bl/Dropbox/Projects/Quicksip/data/Y1A1_IMAGEINFO_and_COADDINFO.fits'
-	pixoffset = 10
-	hdulist = pyfits.open(fname)
-	tbdata = hdulist[1].data
-	hdulist.close()
-	nside = 1024
-	ratiores = 4
-	treemap = HealTree(nside)
-	#results = pool.map(treemap.addElem, [imagedata for imagedata in tbdata])
-	print tbdata.dtype
-	#ind = np.ndarray([0])
-	ind = np.where( tbdata['band'] == 'i' )
-	import numpy.random
-	ind = numpy.random.choice(ind[0], 1 )
-	print 'Number of images :', len(ind)
-	hpxmap = np.zeros(hp.nside2npix(nside))
-	ras_c = []
-	decs_c = []
-	for i, propertyArray in enumerate(tbdata[ind]):
-	    ras_c.append(propertyArray['RA'])
-	    decs_c.append(propertyArray['DEC'])
-	plt.figure()
-	for i, propertyArray in enumerate(tbdata[ind]):
-	    print i
-	    propertyArray.dtype = tbdata.dtype
-	    listpix, weights, thetas_c, phis_c, listpix_sup = computeHPXpix_sequ_new(nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
-	    #listpix2, weights2, thetas_c2, phis_c2 = computeHPXpix_sequ(nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
-	    hpxmap = np.zeros(hp.nside2npix(nside))
-	    hpxmap[listpix] = weights
-	    hpxmap_sup = np.zeros(hp.nside2npix(ratiores*nside))
-	    hpxmap_sup[listpix_sup] = 1.0
-	    listpix_hi, weights_hi, thetas_c_hi, phis_c_hi, superind_hi = computeHPXpix_sequ_new(ratiores*nside, propertyArray, pixoffset=pixoffset, ratiores=1)
-	    hpxmap_hi = np.zeros(hp.nside2npix(ratiores*nside))
-	    hpxmap_hi[listpix_hi] = weights_hi
-	    hpxmap_hitolo = hp.ud_grade(hpxmap_hi, nside)
-	    print 'valid hpxmap_hi', np.where(hpxmap_hi > 0)[0]
-	    print 'hpxmap', zip(np.where(hpxmap > 0)[0], hpxmap[hpxmap > 0])
-	    print 'hpxmap_sup', zip(np.where(hpxmap_sup > 0)[0], hpxmap_sup[hpxmap_sup > 0])
-	    print 'hpxmap_hitolo', zip(np.where(hpxmap_hitolo > 0)[0], hpxmap_hitolo[hpxmap_hitolo > 0])
-	    hp.gnomview(hpxmap_hi, title='hpxmap_hi', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
-	    hp.gnomview(hpxmap_sup, title='hpxmap_sup', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
-	    hp.gnomview(hpxmap_hitolo, title='hpxmap_hitolo', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
-	    hp.gnomview(hpxmap, title='hpxmap', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
-	    #plt.plot(phis_c, thetas_c)
-	    thetas, phis = hp.pix2ang(nside, listpix)
-	    #plt.scatter(phis, thetas, color='red', marker='o', s=50*weights)
-	    #plt.scatter(propertyArray['RA']*np.pi/180, np.pi/2 - propertyArray['DEC']*np.pi/180)
-	    #plt.text(propertyArray['RA']*np.pi/180, np.pi/2 - propertyArray['DEC']*np.pi/180, str(i))
-	plt.show()
-	stop
+    fname = '/Users/bl/Dropbox/Projects/Quicksip/data/SVA1_COADD_ASTROM_PSF_INFO.fits'
+    #fname = '/Users/bl/Dropbox/Projects/Quicksip/data/Y1A1_IMAGEINFO_and_COADDINFO.fits'
+    pixoffset = 10
+    hdulist = pyfits.open(fname)
+    tbdata = hdulist[1].data
+    hdulist.close()
+    nside = 1024
+    ratiores = 4
+    treemap = HealTree(nside)
+    #results = pool.map(treemap.addElem, [imagedata for imagedata in tbdata])
+    print (tbdata.dtype)
+    #ind = np.ndarray([0])
+    ind = np.where( tbdata['band'] == 'i' )
+    import numpy.random
+    ind = numpy.random.choice(ind[0], 1 )
+    print ('Number of images :', len(ind))
+    hpxmap = np.zeros(hp.nside2npix(nside))
+    ras_c = []
+    decs_c = []
+    for i, propertyArray in enumerate(tbdata[ind]):
+        ras_c.append(propertyArray['RA'])
+        decs_c.append(propertyArray['DEC'])
+    plt.figure()
+    for i, propertyArray in enumerate(tbdata[ind]):
+        print (i)
+        propertyArray.dtype = tbdata.dtype
+        listpix, weights, thetas_c, phis_c, listpix_sup = computeHPXpix_sequ_new(nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
+        #listpix2, weights2, thetas_c2, phis_c2 = computeHPXpix_sequ(nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
+        hpxmap = np.zeros(hp.nside2npix(nside))
+        hpxmap[listpix] = weights
+        hpxmap_sup = np.zeros(hp.nside2npix(ratiores*nside))
+        hpxmap_sup[listpix_sup] = 1.0
+        listpix_hi, weights_hi, thetas_c_hi, phis_c_hi, superind_hi = computeHPXpix_sequ_new(ratiores*nside, propertyArray, pixoffset=pixoffset, ratiores=1)
+        hpxmap_hi = np.zeros(hp.nside2npix(ratiores*nside))
+        hpxmap_hi[listpix_hi] = weights_hi
+        hpxmap_hitolo = hp.ud_grade(hpxmap_hi, nside)
+        hp.gnomview(hpxmap_hi, title='hpxmap_hi', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
+        hp.gnomview(hpxmap_sup, title='hpxmap_sup', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
+        hp.gnomview(hpxmap_hitolo, title='hpxmap_hitolo', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
+        hp.gnomview(hpxmap, title='hpxmap', rot=[propertyArray['RA'], propertyArray['DEC']], reso=0.2)
+        #plt.plot(phis_c, thetas_c)
+        thetas, phis = hp.pix2ang(nside, listpix)
+        #plt.scatter(phis, thetas, color='red', marker='o', s=50*weights)
+        #plt.scatter(propertyArray['RA']*np.pi/180, np.pi/2 - propertyArray['DEC']*np.pi/180)
+        #plt.text(propertyArray['RA']*np.pi/180, np.pi/2 - propertyArray['DEC']*np.pi/180, str(i))
+    plt.show()
+    stop
 
 #if __name__ == "__main__":
 #    test()
