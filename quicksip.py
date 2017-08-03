@@ -2,13 +2,18 @@
 import numpy as np
 import healpy as hp
 import pyfits
-import time
+from time import time
 import matplotlib.pyplot as plt
 from multiprocessing import Pool
 from multiprocessing.dummy import Pool as ThreadPool
 import numpy.random
 import os, errno
 import subprocess
+
+import astropy.wcs
+import astropy.io.fits as pyfits
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 
 # ---------------------------------------------------------------------------------------- #
 
@@ -31,7 +36,10 @@ degree_to_arcsec = 3600.0
 # indices are the indices of the pixels to be written
 # values are the values to be written
 def write_partial_map(filename, indices, values, nside, nest=False):
-    fitsformats = [hp.fitsfunc.getformat(np.int32), hp.fitsfunc.getformat(np.float32)]
+    if nside < 8192:
+        fitsformats = [hp.fitsfunc.getformat(np.int32), hp.fitsfunc.getformat(np.float32)]
+    else:
+        fitsformats = [hp.fitsfunc.getformat(np.int64), hp.fitsfunc.getformat(np.float32)]
     column_names = ['PIXEL', 'SIGNAL']
     # maps must have same length
     assert len(set((len(indices), len(values)))) == 1, "Indices and values must have same length"
@@ -290,7 +298,7 @@ def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_
     img_thetas =  np.pi/2  - img_decs * np.pi/180
 
     if ipixel_low is not None and nside_low is not None:
-        img_pix = hp.ang2pix(nside_low, img_thetas, img_phis, nest=False)
+        img_pix = hp.ang2pix(nside_low, img_thetas, img_phis, nest=True)
         if ipixel_low not in img_pix:
             return None
 
@@ -346,9 +354,88 @@ def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_
     sweights = resubweights.sum(axis=1) / float(nsubpixperpix)
     ind = (sweights > 0.0)
     
-    return ipixs_ring[ind], sweights[ind], img_thetas, img_phis, resubweights[ind,:]
+    return ipixs_ring[ind], sweights[ind], img_thetas, img_phis, resubweights[ind, :]
 
 # ---------------------------------------------------------------------------------------- #
+
+def computeHPXpix_CCDpixels(nside, propertyArray, pixoffset=0, ratiores=4, ipixel_low=None, nside_low=None, undersample=1):
+
+    img_ras_c, img_decs_c = computeCorners_WCS_TPV(propertyArray, pixoffset)
+    img_phis_c = img_ras_c * np.pi/180
+    img_thetas_c =  np.pi/2  - img_decs_c * np.pi/180
+    if ipixel_low is not None and nside_low is not None:
+        img_pix = hp.ang2pix(nside_low, img_thetas_c, img_phis_c, nest=True)
+        if ipixel_low not in img_pix:
+            return None
+
+    img_ras, img_decs = computeAllPixels_WCS_TPV(propertyArray, pixoffset, undersample)
+    numccdpix = img_ras.size
+
+    # Coordinates of image pixels
+    img_phis = img_ras * np.pi/180
+    img_thetas =  np.pi/2  - img_decs * np.pi/180
+
+    nonunique_ipixs_ring = hp.ang2pix(nside, img_thetas, img_phis, nest=False)
+    ccd_subipixs_nest = hp.ang2pix(nside*ratiores, img_thetas, img_phis, nest=True)
+    ipixs_ring = np.unique(nonunique_ipixs_ring)
+
+    # compute matrix for which CCD pixels go into which healpix pixel
+    #unique_subipixs_nest, inverse, count = np.unique(subipixs_nest, return_inverse=True, return_counts=True)
+    #idx_vals = np.where(count > 0)[0]
+    # idx_vals_repeated = where(count > 1)[0]
+    # vals_repeated = vals[idx_vals_repeated]
+    #rows, cols = np.where(inverse == idx_vals[:, np.newaxis])
+    #_, inverse_rows = np.unique(rows, return_index=True)
+    #idx_nonunique_subipixs_nest = np.split(cols, inverse_rows[1:])
+
+    ind_U = 0
+    ind_L = 2
+    ind_R = 3
+    ind_B = 1
+    ipixs_nest = hp.ring2nest(nside, ipixs_ring)
+    npixtot = hp.nside2npix(nside)
+    if ratiores > 1:
+        subipixs_nest = np.concatenate([np.arange(ipix*ratiores**2, ipix*ratiores**2+ratiores**2, dtype=np.int64) for ipix in ipixs_nest])
+        nsubpixperpix = ratiores**2
+    else:
+        subipixs_nest = ipixs_nest
+        nsubpixperpix = 1
+
+    ccdmask = subipixs_nest.reshape((ipixs_nest.size, nsubpixperpix, 1)) == ccd_subipixs_nest[None, None, :]
+
+    #ccdmask = np.zeros((ipixs_nest.size, nsubpixperpix, ccd_subipixs_nest.size), dtype=bool)
+    #ccdmask[:] = False
+    #for i1, ipix_nest in enumerate(ipixs_nest):
+    #    for i2, subipix_nest in enumerate(np.arange(ipix_nest*ratiores**2, ipix_nest*ratiores**2+ratiores**2, dtype=np.int64)):
+    #        ccdmask[i1, i2, ccd_subipixs_nest == subipix_nest] = True
+
+    rangepix_thetas, rangepix_phis = hp.pix2ang(nside*ratiores, subipixs_nest, nest=True)
+
+    pmax = np.max(img_phis)
+    pmin = np.min(img_phis)
+    if (pmax - pmin > np.pi):
+        img_phis= np.mod( img_phis + np.pi, 2*np.pi )
+        rangepix_phis = np.mod( rangepix_phis + np.pi, 2*np.pi )
+
+    # weights of subpixels falling in original rectangle CCD or not. 
+    subweights = in_region(rangepix_thetas, rangepix_phis,
+                           img_thetas_c[ind_U], img_phis_c[ind_U], img_thetas_c[ind_L], img_phis_c[ind_L],
+                           img_thetas_c[ind_R], img_phis_c[ind_R], img_thetas_c[ind_B], img_phis_c[ind_B])
+    resubweights = subweights.reshape(-1, nsubpixperpix)
+
+    # normalized resubweights
+    sweights = resubweights.sum(axis=1) / float(nsubpixperpix)
+    ind = (sweights > 0.0)
+    
+    return ipixs_ring[ind], sweights[ind], img_thetas, img_phis, resubweights[ind, :], ccdmask
+
+# ---------------------------------------------------------------------------------------- #
+def computeAllPixels_WCS_TPV(propertyArray, pixoffset, undersample=1):
+    xline = np.arange(1+pixoffset, propertyArray['NAXIS1']-pixoffset+1, undersample)
+    yline = np.arange(1+pixoffset, propertyArray['NAXIS2']-pixoffset+1, undersample)
+    x, y = np.meshgrid(xline, yline)
+    ras, decs = xy2radec(x.ravel(), y.ravel(), propertyArray)
+    return ras, decs
 
 # Crucial routine: read properties of a ccd image and returns its corners in ra dec.
 # pixoffset is the number of pixels to truncate on the edges of each ccd image.
@@ -409,7 +496,7 @@ def deproject_gnom(u, v, center_ra, center_dec):
 
 def radec_gnom(x, y, center_ra, center_dec, cd, crpix, pv):
     p1 = np.array( [ np.atleast_1d(x), np.atleast_1d(y) ] )
-    p2 = np.dot(cd, p1 - crpix[:,np.newaxis])
+    p2 = np.dot(cd, p1 - crpix[:, np.newaxis])
     u = p2[0]
     v = p2[1]
     usq = u*u
@@ -445,7 +532,7 @@ class NDpix:
 
     # Project NDpix into a single number
     # for a given property and operation applied to its array of images
-    def project(self, property, weights, operation):
+    def project(self, property, weights, operation, fracdetvals=None):
 
         asperpix = 0.263
         A = np.pi*(1.0/asperpix)**2
@@ -516,16 +603,18 @@ class NDpix:
             vals = vals * pis
 
         theweights = self.weights
-        weightedarray = (theweights.T * vals).T
-        counts = (theweights.T * pis).sum(axis=1)
+        intweights = np.ceil(theweights)
+        floatweightedarray = (theweights.T * vals).T
+        intweightedarray = (intweights.T * vals).T
+        counts = (intweights.T * pis).sum(axis=1)
         ind = counts > 0
         
         if property == 'maglimit' or property == 'maglimit2' or property == 'maglimit3':
-            sigma2_tot =  1.0 / weightedarray.sum(axis=0)
+            sigma2_tot =  1.0 / intweightedarray.sum(axis=0)
             maglims = np.mean(m_zp) - 2.5*np.log10(10*np.sqrt(A*sigma2_tot) )
             return maglims[ind].mean()
         if property == 'sigmatot':
-            sigma2_tot =  1.0 / weightedarray.sum(axis=0)
+            sigma2_tot =  1.0 / intweightedarray.sum(axis=0)
             return np.sqrt(sigma2_tot)[ind].mean()
         if operation == 'min':
             return np.min(vals)
@@ -534,13 +623,13 @@ class NDpix:
         if operation == 'maxmin':
             return np.max(vals) - np.min(vals)
         if operation == 'mean':
-            return (weightedarray.sum(axis=0) / counts)[ind].mean()
+            return (intweightedarray.sum(axis=0) / counts)[ind].mean()
         if operation == 'median':
-            return np.ma.median(np.ma.array(weightedarray, mask=np.logical_not(theweights)), axis=0)[ind].mean()
+            return np.ma.median(np.ma.array(intweightedarray, mask=np.logical_not(theweights)), axis=0)[ind].mean()
         if operation == 'total':
-            return weightedarray.sum(axis=0)[ind].mean()
+            return floatweightedarray.sum(axis=0)[ind].mean()
         if operation == 'fracdet':
-            temp = weightedarray.sum(axis=0)
+            temp = intweightedarray.sum(axis=0)
             return temp[ind].size / float(temp.size)
 
 
@@ -555,27 +644,60 @@ def projectNDpix(args):
         return hp.UNSEEN
 
 
+
 # Create a "healtree", i.e. a set of pixels with trees of images in them.
-def makeHealTree_partial(args):
-    samplename, nside, ipixel_low, nside_low, ratiores, pixoffset, tbdata = args
+def makeHealTree_CCDpixels(args):
+    samplename, nside, ipixel_low, nside_low, subipixels_low_nest, ratiores, pixoffset, tbdata, local_dir, undersample = args
     treemap = HealTree(nside)
     verbcount = 1000
     count = 0
-    start = time.time()
+    vccd_count = 0
+    start = time()
     duration = 0
     print ('>', samplename, ': starting tree making')
     for i, propertyArray in enumerate(tbdata):
         count += 1
-        start_one = time.time()
-        treemap.addElem_partial(propertyArray, ratiores, pixoffset, ipixel_low, nside_low)
-        end_one = time.time()
+        start_one = time()
+        res = treemap.addElem_CCDpixels(propertyArray, ratiores, pixoffset, ipixel_low, nside_low, subipixels_low_nest, local_dir=local_dir, undersample=undersample)
+        vccd_count += res
+        #if vccd_count == 1:
+        #    break
+        end_one = time()
         duration += float(end_one - start_one)
         if count == verbcount:
             print ('>', samplename, ': processed images', i-verbcount+1, '-', i+1, '(on '+str(len(tbdata))+') in %.2f' % duration, 'sec (~ %.3f' % (duration/float(verbcount)), 'per image)')
             count = 0
             duration = 0
-    end = time.time()
-    print ('>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', len(tbdata), 'images')
+    end = time()
+    print ('>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', vccd_count, 'images')
+    return treemap
+
+
+# Create a "healtree", i.e. a set of pixels with trees of images in them.
+def makeHealTree_partial(args):
+    samplename, nside, ipixel_low, nside_low, subipixels_low_nest, ratiores, pixoffset, tbdata = args
+    treemap = HealTree(nside)
+    verbcount = 1000
+    count = 0
+    vccd_count = 0
+    start = time()
+    duration = 0
+    print ('>', samplename, ': starting tree making')
+    for i, propertyArray in enumerate(tbdata):
+        count += 1
+        start_one = time()
+        res = treemap.addElem_partial(propertyArray, ratiores, pixoffset, ipixel_low, nside_low, subipixels_low_nest)
+        vccd_count += res
+        #if vccd_count == 1:
+        #    break
+        end_one = time()
+        duration += float(end_one - start_one)
+        if count == verbcount:
+            print ('>', samplename, ': processed images', i-verbcount+1, '-', i+1, '(on '+str(len(tbdata))+') in %.2f' % duration, 'sec (~ %.3f' % (duration/float(verbcount)), 'per image)')
+            count = 0
+            duration = 0
+    end = time()
+    print ('>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', vccd_count, 'images')
     return treemap
 
 
@@ -585,22 +707,78 @@ def makeHealTree(args):
     treemap = HealTree(nside)
     verbcount = 1000
     count = 0
-    start = time.time()
+    start = time()
     duration = 0
     print ('>', samplename, ': starting tree making')
     for i, propertyArray in enumerate(tbdata):
         count += 1
-        start_one = time.time()
+        start_one = time()
         treemap.addElem(propertyArray, ratiores, pixoffset)
-        end_one = time.time()
+        end_one = time()
         duration += float(end_one - start_one)
         if count == verbcount:
             print ('>', samplename, ': processed images', i-verbcount+1, '-', i+1, '(on '+str(len(tbdata))+') in %.2f' % duration, 'sec (~ %.3f' % (duration/float(verbcount)), 'per image)')
             count = 0
             duration = 0
-    end = time.time()
+    end = time()
     print ('>', samplename, ': tree making took : %.2f' % float(end - start), 'sec for', len(tbdata), 'images')
     return treemap
+
+
+class Image(object):
+
+    def __init__(self,filename,image_hdu='SCI',mask_hdu='MSK'):
+        self.filename = filename
+        self.image_hdu = image_hdu
+        self.mask_hdu = mask_hdu
+        self._readfile(filename)
+        self._create_wcs()
+
+    @property
+    def corners(self):
+        corners = []
+        for i in range(1,5):
+            corners.append( [self.header['RAC%i'%i],self.header['DECC%d'%i]] )
+        return SkyCoord(np.array(corners),unit=u.deg,frame='icrs')
+
+    @property
+    def center(self):
+        return SkyCoord(self.header['RA_CENT'],self.header['DEC_CENT'],unit=u.deg,frame='icrs')
+
+    def _readfile(self,filename):
+        self.fits = pyfits.open(filename)
+        self.header = self.fits[self.image_hdu].header
+        self.data = self.fits[self.mask_hdu].data
+
+    def _create_wcs(self):
+        self.wcs = astropy.wcs.WCS(self.header)
+
+    def get_radius(self, epsilon=0.0):
+        sep = self.center.separation(self.corners)
+        return np.max(sep.deg)+epsilon
+        
+    def healpixify(self, nside=4096, nest=False):
+        # Determine the radius of the image
+        radius = self.get_radius(epsilon=0.01)
+        center = self.center
+
+        vec = hp.ang2vec(np.radians(90. - center.dec.deg), np.radians(center.ra.deg))
+
+        inclusive, fact = False, 4
+        hpx = hp.query_disc(nside, vec, np.radians(radius), inclusive, fact, nest)
+
+        theta, phi = hp.pix2ang(nside, hpx, nest)
+        ra, dec = np.degrees(phi), 90. - np.degrees(theta)
+
+        xpix,ypix = self.wcs.wcs_world2pix(ra,dec,0)
+        xpix,ypix = np.round([xpix, ypix]).astype(int)
+        shape = self.data.shape
+        sel = (xpix > 0) & (xpix < shape[1]) \
+            & (ypix > 0) & (ypix < shape[0])
+        xpix = xpix[sel]
+        ypix = ypix[sel]
+
+        return hpx[sel], self.data[ypix,xpix], theta[sel], phi[sel]
 
 # ---------------------------------------------------------------------------------------- #
 
@@ -617,53 +795,219 @@ class HealTree:
     # Process image and absorb its properties
     def addElem(self, propertyArray, ratiores, pixoffset):
         # Retrieve pixel indices
-        ipixels, weights, thetas_c, phis_c, subpixrings = computeHPXpix_sequ_new(self.nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
+        ipixels, weights, thetas_c, phis_c, subpixring_weights = computeHPXpix_sequ_new(self.nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores)
         # For each pixel, absorb image properties
         for ii, (ipix, weight) in enumerate(zip(ipixels, weights)):
             if self.pixlist[ipix] == 0:
-                self.pixlist[ipix] = NDpix(propertyArray, subpixrings[ii,:], ratiores)
+                self.pixlist[ipix] = NDpix(propertyArray, subpixring_weights[ii, :], ratiores)
             else:
-                self.pixlist[ipix].addElem(propertyArray, subpixrings[ii,:])
-
+                self.pixlist[ipix].addElem(propertyArray, subpixring_weights[ii, :])
 
     # Process image and absorb its properties
-    def addElem_partial(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low):
-        # Retrieve pixel indices
-        out = computeHPXpix_sequ_new(self.nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores, ipixel_low=ipixel_low, nside_low=nside_low)
-        if out is not None:
-            ipixels, weights, thetas_c, phis_c, subpixrings = out
-            # For each pixel, absorb image properties
-            for ii, (ipix, weight) in enumerate(zip(ipixels, weights)):
-                if self.pixlist[ipix] == 0:
-                    self.pixlist[ipix] = NDpix(propertyArray, subpixrings[ii,:], ratiores)
-                else:
-                    self.pixlist[ipix].addElem(propertyArray, subpixrings[ii,:])
+    def addElem_CCDpixels2(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low, subipixels_low_nest, local_dir='.', undersample=1):
+        img_ras_c, img_decs_c = computeCorners_WCS_TPV(propertyArray, pixoffset)
+        img_phis_c = img_ras_c * np.pi/180
+        img_thetas_c =  np.pi/2  - img_decs_c * np.pi/180
+        img_pix = hp.ang2pix(nside_low, img_thetas_c, img_phis_c, nest=True)
+        if ipixel_low not in img_pix:
+            return 0
 
+        fname_local = local_dir + '/' + propertyArray['path'].strip() + '/' + propertyArray['filename'].strip()
+        print(fname_local)
+        hdulist = pyfits.open(fname_local)        
+        header = hdulist['SCI'].header
+        flatmask = hdulist['MSK'].data[::undersample, ::undersample].T.ravel()
+        hdulist.close()
+
+        origin = 0
+        wcs = astropy.wcs.WCS(header)
+        xline = np.arange(origin+pixoffset, propertyArray['NAXIS1']-pixoffset+origin, undersample)
+        yline = np.arange(origin+pixoffset, propertyArray['NAXIS2']-pixoffset+origin, undersample)
+        x, y = np.meshgrid(xline, yline)
+        xy = np.vstack((x.ravel(), y.ravel())).T
+        img_radecs = wcs.all_pix2world(xy, origin)
+        img_ras, img_decs = img_radecs[:, 0], img_radecs[:, 1]
+        img_phis = img_ras * np.pi/180
+        img_thetas =  np.pi/2  - img_decs * np.pi/180
+
+        nonunique_ipixs_ring = hp.ang2pix(self.nside, img_thetas, img_phis, nest=False)
+        ccd_subipixs_nest = hp.ang2pix(self.nside*ratiores, img_thetas, img_phis, nest=True)
+        ipixs_ring = np.unique(nonunique_ipixs_ring)
+        ipixs_nest = hp.ring2nest(self.nside, ipixs_ring)
+        if ratiores > 1:
+            nsubpixperpix = ratiores**2
+            subipixs_nest = np.concatenate([np.arange(ipix*nsubpixperpix, ipix*nsubpixperpix+nsubpixperpix, dtype=np.int64) 
+                for ipix in ipixs_nest]).reshape((ipixs_nest.size, nsubpixperpix))
+        else:
+            nsubpixperpix = 1
+            subipixs_nest = ipixs_nest.reshape((ipixs_nest.size, nsubpixperpix))
+        #if ratiores < 2**3 and self.nside <= 4096:
+        #ccdmask = subipixs_nest[:, :, None] == ccd_subipixs_nest[None, None, :]
+        binmask = 0*flatmask
+        binmask[(flatmask & 2047) == 0] = 1
+        del flatmask
+        #binmask[:] = 1
+
+        def frac(arr):
+            if len(arr) == 0:
+                return 0
+            else:
+                return arr.sum() / float(arr.size)
+
+        for ii, ipix in enumerate(ipixs_ring):
+            if ipix in subipixels_low_nest:
+                #if ratiores < 2**3 and self.nside <= 4096:
+                #resubweights = np.array([frac(binmask[ccdmask[ii, ii2, :]]) 
+                #        for ii2 in range(nsubpixperpix)])
+                #else:
+                resubweights = np.array([frac(binmask[ccd_subipixs_nest == subipixs_nest[ii, ii2]]) 
+                        for ii2 in range(nsubpixperpix)])
+                if self.pixlist[ipix] == 0:
+                    self.pixlist[ipix] = NDpix(propertyArray, resubweights, ratiores)
+                else:
+                    self.pixlist[ipix].addElem(propertyArray, resubweights)
+        return 1
+
+    # Process image and absorb its properties
+    def addElem_CCDpixels(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low, subipixels_low_nest, 
+                coadd_cut=True, local_dir='.', undersample=1):
+
+        t1 = time()
+        img_ras_c, img_decs_c = computeCorners_WCS_TPV(propertyArray, pixoffset)
+        img_phis_c = img_ras_c * np.pi/180
+        img_thetas_c =  np.pi/2  - img_decs_c * np.pi/180
+        img_pix = hp.ang2pix(nside_low, img_thetas_c, img_phis_c, nest=True)
+        if ipixel_low not in img_pix:
+            return 0
+        t2 = time()
+
+        fname_local = local_dir + '/' + propertyArray['path'].strip() + '/' + propertyArray['filename'].strip()
+        img = Image(fname_local)
+        t3 = time()
+
+        subipix_nest, subval, subpix_thetas, subpix_phis = img.healpixify(self.nside*ratiores, nest=True)
+        ipix_nest = subipix_nest // ratiores**2
+        subipix_nest_indices = subipix_nest % ratiores**2
+        t4 = time()
+
+        sel = (subval & 2047) == 0
+        ipix_nest = ipix_nest[sel]
+        subipix_nest = subipix_nest[sel]
+        subpix_thetas, subpix_phis = subpix_thetas[sel], subpix_phis[sel]
+        subipix_nest_indices = subipix_nest_indices[sel]
+        unique_ipix_nest = np.intersect1d(ipix_nest, subipixels_low_nest)
+        t5 = time()
+
+        if coadd_cut:
+            ind_U, ind_L, ind_R, ind_B = 0, 2, 3, 1
+            #coadd_ras = [propertyArray[v] for v in ['URAUL', 'URALL', 'URALR', 'URAUR']]
+            #coadd_decs = [propertyArray[v] for v in ['UDECUL', 'UDECLL', 'UDECLR', 'UDECUR']]
+            coadd_ras = [float(propertyArray[v]) for v in ['RAC3', 'RAC2', 'RAC1', 'RAC4']]
+            coadd_decs = [float(propertyArray[v]) for v in ['DECC3', 'DECC2', 'DECC1', 'DECC4']]
+            coadd_phis = np.multiply(coadd_ras, np.pi/180)
+            coadd_thetas =  np.pi/2  - np.multiply(coadd_decs, np.pi/180)
+            #coadd_phis= np.mod( coadd_phis + np.pi, 2*np.pi )
+            pmax = np.max(subpix_phis)
+            pmin = np.min(subpix_phis)
+            if (pmax - pmin > np.pi) or (np.max(coadd_phis) - np.min(coadd_phis) > np.pi):
+                coadd_phis= np.mod( coadd_phis + np.pi, 2*np.pi )
+                subpix_phis = np.mod( rangepix_phis + np.pi, 2*np.pi )
+
+        for ii, theipix_nest in enumerate(unique_ipix_nest):
+            resubweights = np.repeat(False, ratiores**2)
+            if coadd_cut:
+                mask = ipix_nest == theipix_nest
+                #resubweights[subipix_nest_indices[mask]] = True
+                temp = in_region(subpix_thetas[mask], subpix_phis[mask],
+                                          coadd_thetas[ind_U], coadd_phis[ind_U], coadd_thetas[ind_L], coadd_phis[ind_L],
+                                          coadd_thetas[ind_R], coadd_phis[ind_R], coadd_thetas[ind_B], coadd_phis[ind_B])
+                resubweights[subipix_nest_indices[mask]] = temp
+            else:
+                resubweights[subipix_nest_indices[ipix_nest == theipix_nest]] = True
+            if self.pixlist[theipix_nest] == 0:
+                self.pixlist[theipix_nest] = NDpix(propertyArray, resubweights, ratiores)
+            else:
+                self.pixlist[theipix_nest].addElem(propertyArray, resubweights)
+
+        t6 = time()
+        #print('Times:', t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, (t6-t5)/unique_ipix_nest.size)
+        return 1
+
+    # Process image and absorb its properties
+    def addElem_CCDpixels_withoutastropywcs(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low, local_dir='.', undersample=1):
+        # Retrieve pixel indices
+        out = computeHPXpix_CCDpixels(self.nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores, ipixel_low=ipixel_low, nside_low=nside_low, undersample=undersample)
+        if out is not None:
+            unique_ipixs_ring, sweights, img_thetas, img_phis, subpixring_weights, ccdmask = out
+            fname_local = local_dir + '/' + propertyArray['path'].strip() + '/' + propertyArray['filename'].strip()
+
+            hdulist = pyfits.open(fname_local)
+            flatmask = hdulist[2].data[::undersample, ::undersample].T.ravel()
+            hdulist.close()
+
+            binmask = 0*flatmask
+            binmask[(flatmask & 2047) == 0] = 1
+            #binmask[:] = 1
+
+            def frac(arr):
+                if len(arr) == 0:
+                    return 0
+                else:
+                    return arr.sum() / float(arr.size)
+
+            for ii, (ipix, weight) in enumerate(zip(unique_ipixs_ring, sweights)):
+                resubweights = np.array([frac(binmask[ccdmask[ii, ii2, :]]) for ii2 in range(ccdmask.shape[1])])
+                print(ii)
+                print(resubweights)
+                print(subpixring_weights[ii, :])
+                if self.pixlist[ipix] == 0:
+                    self.pixlist[ipix] = NDpix(propertyArray, resubweights, ratiores)
+                else:
+                    self.pixlist[ipix].addElem(propertyArray, resubweights)
+            return 1
+        return 0
+
+    # Process image and absorb its properties
+    def addElem_partial(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low, subipixels_low_nest):
+        # Retrieve pixel indices
+        out = computeHPXpix_sequ_new(self.nside, propertyArray, pixoffset=pixoffset, coadd_cut=True, ratiores=ratiores, ipixel_low=ipixel_low, nside_low=nside_low)
+        if out is not None:
+            ipixels, weights, thetas_c, phis_c, subpixring_weights = out
+            ipixels_nest = hp.ring2nest(self.nside, ipixels)
+            mask = np.in1d(ipixels_nest, subipixels_low_nest)
+            # For each pixel, absorb image properties
+            for ii, (ipix_nest, weight) in enumerate(zip(ipixels_nest, weights)):
+                if mask[ii] == True:
+                    if self.pixlist[ipix_nest] == 0:
+                        self.pixlist[ipix_nest] = NDpix(propertyArray, subpixring_weights[ii, :], ratiores)
+                    else:
+                        self.pixlist[ipix_nest].addElem(propertyArray, subpixring_weights[ii, :])
+            return 1
+        return 0
 
      # Project HealTree into partial Healpix map
      # for a given property and operation applied to its array of images
     def project_partial(self, property, weights, operation, pool=None):
-        ind = np.where(self.pixlist != 0)
-        pixel = np.arange(self.npix)[ind]
-        verbcount = pixel.size / 10
+        ind = np.where(self.pixlist != 0)[0]
+        verbcount = ind.size / 10
         count = 0
-        start = time.time()
+        start = time()
         duration = 0
-        signal = np.zeros(pixel.size)
+        signal = np.zeros(ind.size)
         for i, pix in enumerate(self.pixlist[ind]):
             count += 1
-            start_one = time.time()
+            start_one = time()
             signal[i] = pix.project(property, weights, operation)
-            end_one = time.time()
+            end_one = time()
             duration += float(end_one - start_one)
             if count == verbcount:
-                print ('>', property, weights, operation, ': processed pixels', i-verbcount+1, '-', i+1, '(on '+str(pixel.size)+') in %.1e' % duration, 'sec (~ %.1e' % (duration/float(verbcount)), 'per pixel)')
+                print ('>', property, weights, operation, ': processed pixels', i-verbcount+1, '-', i+1, '(on '+str(ind.size)+') in %.1e' % duration, 'sec (~ %.1e' % (duration/float(verbcount)), 'per pixel)')
                 count = 0
                 duration = 0
-        end = time.time()
-        print ('> Projection', property, weights, operation, ' took : %.2f' % float(end - start), 'sec for', pixel.size, 'pixels')
+        end = time()
+        print ('> Projection', property, weights, operation, ' took : %.2f' % float(end - start), 'sec for', ind.size, 'pixels')
         #signal = [pix.project(property, weights, operation) for pix in self.pixlist[ind]]
-        return pixel, signal
+        return ind, signal
 
      # Project HealTree into regular Healpix map
      # for a given property and operation applied to its array of images
@@ -716,7 +1060,7 @@ def addElem(args):
 # ---------------------------------------------------------------------------------------- #
 
 # Read and project a Healtree into Healpix maps, and write them.
-def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_name, outrootdir, sample_names, inds, nside, ratiores, pixoffset, ipixel_low=1, nside_low=1, nsidesout=None):
+def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_name, outrootdir, sample_names, inds, nside, ratiores, pixoffset, ipixel_low=1, nside_low=1, nsidesout=None, local_dir='.', undersample=1):
 
     resol_prefix = 'nside'+str(nside)+'_oversamp'+str(ratiores)
     outroot = outrootdir + '/' + catalogue_name + '/' + resol_prefix + '/'
@@ -783,44 +1127,137 @@ def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_
                 cutmap_indices, cutmap_signal = makeHpxMap_partial( (treemap, property, weights, operation) )
                 write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=False)
 
-    if mode == 4: # Fully sequential with ccds grouped in pixel
+    if mode >= 4: # Fully sequential with ccds grouped in pixel
         ratiores2 = 2 ** (np.log(nside / nside_low) / np.log(2))
-        ipixel_low2 = hp.ring2nest(nside_low, ipixel_low)
-        subipixs_nest = np.arange(ipixel_low2*ratiores2**2, ipixel_low2*ratiores2**2+ratiores2**2, dtype=np.int64)
-        subipixs_ring = hp.nest2ring(nside, subipixs_nest)
-        invert_subipixs_ring = np.setdiff1d(np.arange(hp.nside2npix(nside)), subipixs_ring)
+        subipixs_nest = np.arange(ipixel_low*ratiores2**2, ipixel_low*ratiores2**2+ratiores2**2, dtype=np.int64)
+        #subipixs_ring = hp.nest2ring(nside, subipixs_nest)
+        #invert_subipixs_ring = np.setdiff1d(np.arange(hp.nside2npix(nside)), subipixs_ring)
         for sample_name, ind in zip(sample_names, inds):
-            treemap = makeHealTree_partial( (catalogue_name+'_'+sample_name, nside, ipixel_low, nside_low, ratiores, pixoffset, np.array(tbdata[ind])) )
-            treemap.pixlist[invert_subipixs_ring] = np.zeros(invert_subipixs_ring.size, dtype=object)
+            if mode == 5:
+                treemap = makeHealTree_CCDpixels( (catalogue_name+'_'+sample_name, nside, ipixel_low, nside_low, subipixs_nest, ratiores, pixoffset, np.array(tbdata[ind]), local_dir, undersample,) )
+            if mode == 4:
+                treemap = makeHealTree_partial( (catalogue_name+'_'+sample_name, nside, ipixel_low, nside_low, subipixs_nest, ratiores, pixoffset, np.array(tbdata[ind])) )
+            #treemap.pixlist[invert_subipixs_ring] = np.zeros(invert_subipixs_ring.size, dtype=object)
             for property, weights, operation in propertiesweightsoperations:
                 cutmap_indices, cutmap_signal = makeHpxMap_partial( (treemap, property, weights, operation) )
                 if np.sum(treemap.pixlist != 0) > 0:
                     if nsidesout is None:
                         fname = outroot + '_'.join([catalogue_name, sample_name, resol_prefix, property, weights, operation]) + '_' + str(ipixel_low) + '.fits'
                         print ('Creating and writing', fname)
-                        write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=False)
+                        write_partial_map(fname, cutmap_indices, cutmap_signal, nside, nest=True)
                     else:
-                        cutmap_indices_nest = hp.ring2nest(nside, cutmap_indices)
-                        outmap_hi = np.zeros(hp.nside2npix(nside))
-                        outmap_hi.fill(0.0) #outmap_hi.fill(hp.UNSEEN)
-                        outmap_hi[cutmap_indices_nest] = cutmap_signal
-                        for nside_out in nsidesout:
-                            if nside_out == nside:
-                                outmap_lo = outmap_hi
-                            else:
-                                outmap_lo = hp.ud_grade(outmap_hi, nside_out, order_in='NESTED', order_out='NESTED')
-                            resol_prefix2 = 'nside'+str(nside_out)+'from'+str(nside)+'o'+str(ratiores)
-                            outroot2 = outrootdir + '/' + catalogue_name + '/' + resol_prefix2 + '/'
-                            mkdir_p(outroot2)
-                            fname = outroot2 + '_'.join([catalogue_name, sample_name, resol_prefix2, property, weights, operation]) + '_' + str(ipixel_low) + '.fits'
-                            print ('Writing', fname)
-                            hp.write_map(fname, outmap_lo, nest=True)
-                            subprocess.call("gzip "+fname,shell=True)
+                        stop
 # ---------------------------------------------------------------------------------------- #
 
 
+if False:
+    fname = '/Users/bl/Downloads/OPS/finalcut/Y2A1-2mass/Y2-2368/20140828/D00352819/p01/red/immask/D00352819_g_c45_r2368p01_immasked.fits.fz'
+    hdulist = pyfits.open(fname)
+    #imgdata1 = hdulist[1].data
+    #imgdata2 = hdulist[2].data
+    #imgdata3 = hdulist[3].data
+    #hdulist.close()
+    header = hdulist['SCI'].header
+    flatmask = hdulist['MSK'].data.T.ravel()
+    hdulist.close()
+    binmask = np.zeros(flatmask.size, dtype=bool)
+    binmask[(flatmask & 2047) == 0] = True
+    ind = np.where((flatmask & 2047) != 0)[0]
+    print(binmask, binmask.sum(), binmask.size, np.sum((flatmask & 2047) != 0))
+
+    np.save('D00469620_Y_c01_r2371p01_mask.npy', binmask)
+    np.save('D00469620_Y_c01_r2371p01_mask2.npy', ~binmask)
+    np.save('D00469620_Y_c01_r2371p01_mask3.npy', ind)
+    np.save('D00469620_Y_c01_r2371p01_mask4.npy', np.packbits(binmask))
+    np.save('D00469620_Y_c01_r2371p01_mask5.npy', np.packbits(~binmask))
+    np.savez_compressed('D00469620_Y_c01_r2371p01_maskb.npy', binmask)
+    np.savez_compressed('D00469620_Y_c01_r2371p01_maskb2.npy', ~binmask)
+    np.savez_compressed('D00469620_Y_c01_r2371p01_maskb3.npy', ind)
+    np.savez_compressed('D00469620_Y_c01_r2371p01_maskb4.npy', np.packbits(binmask))
+    np.savez_compressed('D00469620_Y_c01_r2371p01_maskb5.npy', np.packbits(~binmask))
+    hdu = pyfits.BinTableHDU.from_columns([pyfits.Column(name='mask', array=binmask, format='L')])
+    hdu.writeto('D00469620_Y_c01_r2371p01_mask.fits')
+    hdu = pyfits.BinTableHDU.from_columns([pyfits.Column(name='ind', array=ind, format='I')])
+    hdu.writeto('D00469620_Y_c01_r2371p01_mask2.fits')
+    hdu = pyfits.BinTableHDU.from_columns([pyfits.Column(name='mask', array=np.packbits(binmask), format='B')])
+    hdu.writeto('D00469620_Y_c01_r2371p01_mask3.fits')
+
+    stop
+    #hdulist = pyfits.open('/Users/bl/Dropbox/Projects/quicksip/data/Y1A1_SPT_IMAGEINFO_and_COADDINFO.fits')
+
+    hdulist = pyfits.open('/Users/bl/Dropbox/repos/QuickSip/y3a2_quicksip_info_000004.fits')
+    tbdata = hdulist[1].data
+    hdulist.close()
+
+    iccd = 10
+
+    propertyArray = tbdata[iccd]
+    #coadd_ras = [propertyArray[v] for v in ['URAUL', 'URALL', 'URALR', 'URAUR']]
+    #coadd_decs = [propertyArray[v] for v in ['UDECUL', 'UDECLL', 'UDECLR', 'UDECUR']]
+    coadd_ras = [float(propertyArray[v]) for v in ['RAC3', 'RAC2', 'RAC1', 'RAC4']]
+    coadd_decs = [float(propertyArray[v]) for v in ['DECC3', 'DECC2', 'DECC1', 'DECC4']]
+    text = [str(i+1) for i in range(4)]
+
+    print(coadd_ras)
+    print(coadd_decs)
+    plt.plot(coadd_ras, coadd_decs)
+    for i in range(4):
+        plt.text(coadd_ras[i], coadd_decs[i], text[i])
+    plt.show()
+
+    stop
+
+    #pix_thetas, pix_phis = hp.pix2ang(nside, ipixs_ring, nest=False)
+
+    local_dir = '.'
+    #local_dir = '/archive_data/desarchive/'
+
+    fname_remote = tbdata[iccd]['basepath'] + '/' + tbdata[iccd]['path'] + '/' + tbdata[iccd]['filename']
+    fname_local = local_dir + '/' + tbdata[iccd]['path'] + '/' + tbdata[iccd]['filename']
+
+    password_manager = urllib2.HTTPPasswordMgrWithPriorAuth()
+    password_manager.add_password(None, fname_remote, user, password, is_authenticated=True)
+    auth_manager = urllib2.HTTPBasicAuthHandler(password_manager)
+    opener = urllib2.build_opener(auth_manager)
 
 
+    #os.makedirs(local_dir + tbdata[iccd]['path'])
+
+    if not os.path.isdir(local_dir + '/' + tbdata[iccd]['path']):
+        os.makedirs(local_dir + '/' + tbdata[iccd]['path'])
+
+    if not os.path.exists(fname_local):
+        with open(fname_local, 'wb') as fd:
+            with opener.open(fname_remote) as f:
+                fd.write(f.read())
+
+    undersample = 2
+
+    hdulist = pyfits.open(fname_local)
+    flatmask = hdulist[2].data.T[::undersample, ::undersample].ravel()
+    hdulist.close()
+
+
+    nside = 1024
+    ratiores = 2
+    out = computeHPXpix_CCDpixels(nside, tbdata[iccd], pixoffset=0, ratiores=ratiores, coadd_cut=False, ipixel_low=None, nside_low=None, undersample=undersample)
+    ipixs_ring, sweights, img_thetas, img_phis, resubweights, ccdmask = out
+
+
+    fig, axs = plt.subplots(4, 4)
+    axs = axs.ravel()
+    cols = ['red', 'green', 'yellow', 'blue', 'orange', 'purple']
+    for i1, ipix_ring in enumerate(ipixs_ring[:16]):
+        axs[i1].scatter(img_thetas, img_phis, marker='.', s=1, color='k', alpha=0.4)
+        for i2 in range(ccdmask.shape[1]):
+            mask = ccdmask[i1, i2, :]
+            axs[i1].scatter(img_thetas[mask], img_phis[mask], marker='.', s=3, color=cols[i2])
+        axs[i1].set_xlim([0.9999*np.min(img_thetas), 1.0001*np.max(img_thetas)])
+        axs[i1].set_ylim([0.9999*np.min(img_phis), 1.0001*np.max(img_phis)])
+    fig.tight_layout()
+    plt.show()
+
+    #TODO: USE https://github.com/kadrlica/healpixify/blob/master/bin/healpixify
 
 def test():
     fname = '/Users/bl/Dropbox/Projects/Quicksip/data/SVA1_COADD_ASTROM_PSF_INFO.fits'
