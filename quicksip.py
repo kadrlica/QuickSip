@@ -812,7 +812,7 @@ class HealTree:
         if ipixel_low not in img_pix:
             return 0
 
-        fname_local = local_dir + '/' + propertyArray['path'].strip() + '/' + propertyArray['filename'].strip()
+        fname_local = local_dir + '/' + propertyArray['PATH'].strip() + '/' + propertyArray['FILENAME'].strip()
         print(fname_local)
         hdulist = pyfits.open(fname_local)        
         header = hdulist['SCI'].header
@@ -870,18 +870,22 @@ class HealTree:
 
     # Process image and absorb its properties
     def addElem_CCDpixels(self, propertyArray, ratiores, pixoffset, ipixel_low, nside_low, subipixels_low_nest, 
-                coadd_cut=True, local_dir='.', undersample=1):
+                          coadd_cut=False, # ADW: don't cut to coadd tiles
+                          #coadd_cut=True, 
+                          local_dir='.', undersample=1):
 
         t1 = time()
         img_ras_c, img_decs_c = computeCorners_WCS_TPV(propertyArray, pixoffset)
         img_phis_c = img_ras_c * np.pi/180
         img_thetas_c =  np.pi/2  - img_decs_c * np.pi/180
         img_pix = hp.ang2pix(nside_low, img_thetas_c, img_phis_c, nest=True)
-        if ipixel_low not in img_pix:
+        if (ipixel_low is not None) and (ipixel_low not in img_pix):
+            print("Image not in ipixel_low")
+            print(img_ras_c,img_decs_c,img_pix)
             return 0
         t2 = time()
 
-        fname_local = local_dir + '/' + propertyArray['path'].strip() + '/' + propertyArray['filename'].strip()
+        fname_local = local_dir + '/' + propertyArray['PATH'].strip() + '/' + propertyArray['FILENAME'].strip()
         img = Image(fname_local)
         t3 = time()
 
@@ -939,7 +943,7 @@ class HealTree:
         out = computeHPXpix_CCDpixels(self.nside, propertyArray, pixoffset=pixoffset, ratiores=ratiores, ipixel_low=ipixel_low, nside_low=nside_low, undersample=undersample)
         if out is not None:
             unique_ipixs_ring, sweights, img_thetas, img_phis, subpixring_weights, ccdmask = out
-            fname_local = local_dir + '/' + propertyArray['path'].strip() + '/' + propertyArray['filename'].strip()
+            fname_local = local_dir + '/' + propertyArray['PATH'].strip() + '/' + propertyArray['FILENAME'].strip()
 
             hdulist = pyfits.open(fname_local)
             flatmask = hdulist[2].data[::undersample, ::undersample].T.ravel()
@@ -1212,8 +1216,8 @@ if False:
     local_dir = '.'
     #local_dir = '/archive_data/desarchive/'
 
-    fname_remote = tbdata[iccd]['basepath'] + '/' + tbdata[iccd]['path'] + '/' + tbdata[iccd]['filename']
-    fname_local = local_dir + '/' + tbdata[iccd]['path'] + '/' + tbdata[iccd]['filename']
+    fname_remote = tbdata[iccd]['BASEPATH'] + '/' + tbdata[iccd]['PATH'] + '/' + tbdata[iccd]['FILENAME']
+    fname_local = local_dir + '/' + tbdata[iccd]['PATH'] + '/' + tbdata[iccd]['FILENAME']
 
     password_manager = urllib2.HTTPPasswordMgrWithPriorAuth()
     password_manager.add_password(None, fname_remote, user, password, is_authenticated=True)
@@ -1221,10 +1225,10 @@ if False:
     opener = urllib2.build_opener(auth_manager)
 
 
-    #os.makedirs(local_dir + tbdata[iccd]['path'])
+    #os.makedirs(local_dir + tbdata[iccd]['PATH'])
 
-    if not os.path.isdir(local_dir + '/' + tbdata[iccd]['path']):
-        os.makedirs(local_dir + '/' + tbdata[iccd]['path'])
+    if not os.path.isdir(local_dir + '/' + tbdata[iccd]['PATH']):
+        os.makedirs(local_dir + '/' + tbdata[iccd]['PATH'])
 
     if not os.path.exists(fname_local):
         with open(fname_local, 'wb') as fd:
