@@ -1,7 +1,6 @@
 
 import numpy as np
 import healpy as hp
-import pyfits
 from time import time
 import matplotlib.pyplot as plt
 from multiprocessing import Pool
