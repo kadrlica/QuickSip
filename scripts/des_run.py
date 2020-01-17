@@ -1,7 +1,7 @@
 
 import numpy as np
 import healpy as hp
-import pyfits
+import astropy.io.fits as pyfits
 from multiprocessing import Pool
 
 from quicksip import *
@@ -19,7 +19,7 @@ mode = 1 # 1: fully sequential, 2: parallel then sequential, 3: fully parallel
 
 catalogue_name = 'Y1A1NEW_COADD_DFULL'
 pixoffset = 15 # How many pixels are being removed on the edge of each CCD? 15 for DES.
-fname = 'data/Y1A1_COADD_DFULL_ASTROM_PSF_INFO.fits'
+fname = 'y3a2_quicksip_info.fits'
 # Where to write the maps ? Make sure directory exists.
 outroot = 'maps'+str(pixoffset)+'pix/'
 
