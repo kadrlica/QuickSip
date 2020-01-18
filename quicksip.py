@@ -1,4 +1,3 @@
-
 import numpy as np
 import healpy as hp
 from time import time
@@ -283,10 +282,16 @@ def computeHPXpix_sequ_new(nside, propertyArray, pixoffset=0, ratiores=4, coadd_
     img_ras, img_decs = computeCorners_WCS_TPV(propertyArray, pixoffset)
 
     # Coordinates of coadd corners
-    # RALL, t.DECLL, t.RAUL, t.DECUL, t.RAUR, t.DECUR, t.RALR, t.DECLR, t.URALL, t.UDECLL, t.URAUR, t.UDECUR
+    # RALL, t.DECLL, t.RAUL, t.DECUL, t.RAUR, t.DECUR, t.RALR, t.DECLR, 
+    # t.URALL, t.UDECLL, t.URAUR, t.UDECUR
+    # ADW: These are old and probably a remnant of past times...
+    # The URA, UDEC values are derived from the object catalogs
     if coadd_cut:
-        coadd_ras = [propertyArray[v] for v in ['URAUL', 'URALL', 'URALR', 'URAUR']]
-        coadd_decs = [propertyArray[v] for v in ['UDECUL', 'UDECLL', 'UDECLR', 'UDECUR']]
+        #coadd_ras = [propertyArray[v] for v in ['URAUL', 'URALL', 'URALR', 'URAUR']]
+        #coadd_decs = [propertyArray[v] for v in ['UDECUL', 'UDECLL', 'UDECLR', 'UDECUR']]
+        coadd_ras = [float(propertyArray[v]) for v in ['RAC3', 'RAC2', 'RAC1', 'RAC4']]
+        coadd_decs = [float(propertyArray[v]) for v in ['DECC3', 'DECC2', 'DECC1', 'DECC4']]
+
         coadd_phis = np.multiply(coadd_ras, np.pi/180)
         coadd_thetas =  np.pi/2  - np.multiply(coadd_decs, np.pi/180)
     else:
@@ -536,12 +541,15 @@ class NDpix:
         asperpix = 0.263
         A = np.pi*(1.0/asperpix)**2
         # Computes COADD weights
-        if weights == 'coaddweights3' or weights == 'coaddweights2' or weights == 'coaddweights' or property == 'maglimit2' or property == 'maglimit' or property == 'maglimit3' or property == 'sigmatot':
+        if weights in ('coaddweights3', 'coaddweights2', 'coaddweights') \
+                or property in ('maglimit', 'maglimit2', 'maglimit3', 'sigmatot'):
             m_zpi = np.array([proparr['MAGZP'] for proparr in self.propertyArray])
-            if property == 'sigmatot':
-                m_zp = np.array([30.0 for proparr in self.propertyArray])
-            else:
-                m_zp = np.array([proparr['COADD_MAGZP'] for proparr in self.propertyArray])
+            # ADW: Assume coadd zeropoint is always 30.0
+            #if property == 'sigmatot':
+            #    m_zp = np.array([30.0 for proparr in self.propertyArray])
+            #else:
+            #    m_zp = np.array([proparr['COADD_MAGZP'] for proparr in self.propertyArray])
+            m_zp = np.array([30.0 for proparr in self.propertyArray])
                 
             if weights == 'coaddweights' or property == 'maglimit':
                 sigma_bgi = np.array([
@@ -595,7 +603,7 @@ class NDpix:
         # Retrieve property array and apply operation (with super-resolution)
         if property == 'count':
             vals = np.array([1.0 for proparr in self.propertyArray])
-        elif property == 'maglimit2' or property == 'maglimit' or property == 'maglimit3' or property == 'sigmatot':
+        elif property in ('maglimit', 'maglimit2', 'maglimit3', 'sigmatot'):
             vals = (sigpis/sigma_bgi)**2
         else:
             vals = np.array([proparr[property] for proparr in self.propertyArray])
@@ -608,7 +616,7 @@ class NDpix:
         counts = (intweights.T * pis).sum(axis=1)
         ind = counts > 0
         
-        if property == 'maglimit' or property == 'maglimit2' or property == 'maglimit3':
+        if property in ('maglimit', 'maglimit2', 'maglimit3'):
             sigma2_tot =  1.0 / intweightedarray.sum(axis=0)
             maglims = np.mean(m_zp) - 2.5*np.log10(10*np.sqrt(A*sigma2_tot) )
             return maglims[ind].mean()
@@ -1059,8 +1067,35 @@ def addElem(args):
 # ---------------------------------------------------------------------------------------- #
 
 # Read and project a Healtree into Healpix maps, and write them.
-def project_and_write_maps(mode, propertiesweightsoperations, tbdata, catalogue_name, outrootdir, sample_names, inds, nside, ratiores, pixoffset, ipixel_low=1, nside_low=1, nsidesout=None, local_dir='.', undersample=1):
+def project_and_write_maps(mode, propertiesweightsoperations, tbdata, 
+                           catalogue_name, outrootdir, sample_names, 
+                           inds, nside, ratiores, pixoffset, 
+                           ipixel_low=1, nside_low=1, nsidesout=None, 
+                           local_dir='.', undersample=1):
+    """ADW: This function is in dire need of documentation...
 
+    Parameters
+    ----------
+    mode :
+    propertiesweightsoperations :
+    tbdata :
+    catalogue_name :
+    outrootdir :
+    sample_names :
+    inds :
+    nside :
+    ratiores :
+    pixoffset : 
+    ipixel_low : 
+    nside_low : 
+    nsidesout : 
+    local_dir : 
+    undersample :
+
+    Returns
+    -------
+    None
+    """
     resol_prefix = 'nside'+str(nside)+'_oversamp'+str(ratiores)
     outroot = outrootdir + '/' + catalogue_name + '/' + resol_prefix + '/'
     mkdir_p(outroot)
